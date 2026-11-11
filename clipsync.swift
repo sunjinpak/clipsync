@@ -71,30 +71,39 @@ Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
 
 // Hub -> local clipboard (long poll). Start from the hub's current id so a
 // restart never overwrites what is already on this Mac's clipboard.
+// One poll round; returns the updated `since` (-1 = ask the hub for its id).
+func pollOnce(_ since: Int) -> Int {
+    if since < 0 {
+        let (code, j) = call("/id", timeout: 10)
+        if code == 200, let id = j?["id"] as? Int { return id }
+        sleep(5)
+        return -1
+    }
+    let (code, j) = call("/wait?since=\(since)", timeout: 45)
+    if code == 200, let id = j?["id"] as? Int, let t = j?["text"] as? String {
+        if (j?["from"] as? String) != me, !t.isEmpty {
+            DispatchQueue.main.async {
+                guard t != lastText else { return }
+                pb.clearContents()
+                pb.setString(t, forType: .string)
+                lastCount = pb.changeCount
+                lastText = t
+            }
+        }
+        return id
+    }
+    if code != 204 {
+        log("wait failed: HTTP \(code)")
+        sleep(5)
+    }
+    return since
+}
+
 Thread.detachNewThread {
     var since = -1
-    while true {
-        if since < 0 {
-            let (code, j) = call("/id", timeout: 10)
-            if code == 200, let id = j?["id"] as? Int { since = id } else { sleep(5); continue }
-        }
-        let (code, j) = call("/wait?since=\(since)", timeout: 45)
-        if code == 200, let id = j?["id"] as? Int, let t = j?["text"] as? String {
-            since = id
-            if (j?["from"] as? String) != me, !t.isEmpty {
-                DispatchQueue.main.async {
-                    guard t != lastText else { return }
-                    pb.clearContents()
-                    pb.setString(t, forType: .string)
-                    lastCount = pb.changeCount
-                    lastText = t
-                }
-            }
-        } else if code != 204 {
-            log("wait failed: HTTP \(code)")
-            sleep(5)
-        }
-    }
+    // A detached thread has no run loop to drain autoreleased Foundation objects,
+    // so each poll needs its own pool (without it memory grew ~1 GB a month).
+    while true { autoreleasepool { since = pollOnce(since) } }
 }
 
 log("clipsync started as \(me), hub \(hub)")
